@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Prueba WebRTC - Bypass UPVNET (TURN)</title>
+  <title>Prueba WebRTC - Evasión Cortafuegos (TCP/TLS)</title>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <style>
     body { font-family: Arial, sans-serif; max-width: 500px; margin: 20px auto; padding: 15px; background: #f4f6f9; }
@@ -14,13 +14,13 @@
     .btn-host { background-color: #28a745; }
     .btn-client { background-color: #007bff; }
     .btn-send { background-color: #6c757d; }
-    #log { background: #1e1e1e; color: #33ff33; padding: 12px; height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; border-radius: 6px; }
+    #log { background: #1e1e1e; color: #33ff33; padding: 12px; height: 280px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; border-radius: 6px; }
   </style>
 </head>
 <body>
 
   <div class="card">
-    <h2>Prueba WebRTC (Bypass Red Estricta)</h2>
+    <h2>Prueba WebRTC (TCP/TLS Forzado)</h2>
     
     <div>
       <label><b>Código de 4 dígitos:</b></label>
@@ -48,20 +48,39 @@
     let roomCode = "";
     let iceCandidatesQueue = [];
 
-    // STUN para redes normales y TURN (OpenRelay) para saltar firewalls como UPVNET
+    // Batería completa de STUNs y TURNs (UDP, TCP y TLS cifrado)
     const rtcConfig = {
       iceServers: [
+        // STUNs básicos para obtener IP pública
         { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun.relay.metered.ca:80' },
+        // TURN 1: OpenRelay (Múltiples puertos y protocolos)
         {
           urls: [
             "turn:openrelay.metered.ca:80",
+            "turn:openrelay.metered.ca:80?transport=tcp",
             "turn:openrelay.metered.ca:443",
-            "turn:openrelay.metered.ca:443?transport=tcp"
+            "turn:openrelay.metered.ca:443?transport=tcp",
+            "turns:openrelay.metered.ca:443?transport=tcp" // Forzado TLS
+          ],
+          username: "openrelayproject",
+          credential: "openrelayproject"
+        },
+        // TURN 2: Global Relay (Respaldo)
+        {
+          urls: [
+            "turn:global.relay.metered.ca:80",
+            "turn:global.relay.metered.ca:80?transport=tcp",
+            "turn:global.relay.metered.ca:443?transport=tcp",
+            "turns:global.relay.metered.ca:443?transport=tcp" // Forzado TLS
           ],
           username: "openrelayproject",
           credential: "openrelayproject"
         }
-      ]
+      ],
+      // Forzamos a que intente todas las rutas posibles agresivamente
+      iceTransportPolicy: "all" 
     };
 
     function log(txt) {
@@ -73,12 +92,12 @@
     function monitorIceState() {
       pc.oniceconnectionstatechange = () => {
         const state = pc.iceConnectionState;
-        log(`<span style="color:#ffeb3b">Estado del túnel de red: <b>${state.toUpperCase()}</b></span>`);
+        log(`<span style="color:#ffeb3b">Túnel ICE: <b>${state.toUpperCase()}</b></span>`);
         
         if (state === 'failed') {
-          log("<span style='color:#ff6b6b'><b>ERROR:</b> Ni siquiera el servidor TURN pudo saltar el bloqueo.</span>");
+          log("<span style='color:#ff6b6b'><b>ERROR FINAL:</b> UPVNET bloquea todo el tráfico P2P y TURN. Necesitas probar fuera de esta red o crear una cuenta gratuita en Metered.ca para obtener un TURN privado.</span>");
         } else if (state === 'connected' || state === 'completed') {
-          log("<span style='color:#00ffff'>Ruta encontrada con éxito (Posiblemente usando TURN).</span>");
+          log("<span style='color:#00ffff'>¡Ruta encontrada con éxito saltando el firewall!</span>");
         }
       };
     }
@@ -89,7 +108,7 @@
 
       mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
       mqttClient.on('connect', () => {
-        log("Conectado a red MQTT.");
+        log("Conectado a señalización. Esperando cliente...");
         mqttClient.subscribe(`upv/vr/${roomCode}/join`);
         mqttClient.subscribe(`upv/vr/${roomCode}/answer`);
         mqttClient.subscribe(`upv/vr/${roomCode}/candidate_client`);
@@ -100,10 +119,10 @@
         if (payload.sender === myId) return;
 
         if (topic === `upv/vr/${roomCode}/join` && !pc) {
-          log("Cliente detectado. Configurando WebRTC con TURN...");
+          log("Cliente llama. Abriendo WebRTC (TCP/TLS)...");
           createHostOffer();
         } else if (topic === `upv/vr/${roomCode}/answer` && pc && !pc.currentRemoteDescription) {
-          log("Respuesta obtenida. Negociando ruta de red...");
+          log("SDP recibido. Negociando cifrado...");
           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
           processIceQueue();
         } else if (topic === `upv/vr/${roomCode}/candidate_client`) {
@@ -121,6 +140,8 @@
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
+          // Loggear el tipo de candidato (host, srflx, relay) para depuración
+          log(`<i>Candidato generado: ${event.candidate.type}</i>`);
           mqttClient.publish(`upv/vr/${roomCode}/candidate_host`, JSON.stringify({ sender: myId, candidate: event.candidate }));
         }
       };
@@ -136,7 +157,7 @@
 
       mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
       mqttClient.on('connect', () => {
-        log("Conectado a red MQTT. Solicitando unirse...");
+        log("Conectado. Solicitando unión al Host...");
         mqttClient.subscribe(`upv/vr/${roomCode}/offer`);
         mqttClient.subscribe(`upv/vr/${roomCode}/candidate_host`);
         mqttClient.publish(`upv/vr/${roomCode}/join`, JSON.stringify({ sender: myId }));
@@ -147,7 +168,7 @@
         if (payload.sender === myId) return;
 
         if (topic === `upv/vr/${roomCode}/offer` && !pc) {
-          log("Oferta del Host recibida.");
+          log("Oferta recibida. Configurando red...");
           handleOfferAndAnswer(payload.sdp);
         } else if (topic === `upv/vr/${roomCode}/candidate_host`) {
           handleReceivedCandidate(payload.candidate);
@@ -166,6 +187,7 @@
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
+          log(`<i>Candidato generado: ${event.candidate.type}</i>`);
           mqttClient.publish(`upv/vr/${roomCode}/candidate_client`, JSON.stringify({ sender: myId, candidate: event.candidate }));
         }
       };
@@ -180,7 +202,7 @@
 
     async function handleReceivedCandidate(candidate) {
       if (pc && pc.remoteDescription) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => log(`Error ICE: ${e}`));
+        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.log(e));
       } else {
         iceCandidatesQueue.push(candidate);
       }
@@ -189,17 +211,17 @@
     async function processIceQueue() {
       while (iceCandidatesQueue.length > 0) {
         const candidate = iceCandidatesQueue.shift();
-        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => log(`Error ICE Queue: ${e}`));
+        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.log(e));
       }
     }
 
     function setupDataChannelEvents() {
       dataChannel.onopen = () => {
-        log("<b style='color:#00ff00'>¡ENLACE WEBRTC P2P ESTABLECIDO!</b>");
+        log("<b style='color:#00ff00; font-size:14px'>¡ENLACE WEBRTC ESTABLECIDO (BYPASS EXITOSO)!</b>");
         document.getElementById('chat').style.display = 'block';
       };
       dataChannel.onmessage = (e) => {
-        log(`<span style='color:#00ffff'><b>Recibido P2P:</b> ${e.data}</span>`);
+        log(`<span style='color:#00ffff'><b>Mensaje recibido:</b> ${e.data}</span>`);
       };
     }
 
@@ -207,7 +229,7 @@
       const input = document.getElementById('msgInput');
       if (dataChannel && dataChannel.readyState === 'open' && input.value.trim() !== '') {
         dataChannel.send(input.value);
-        log(`<b>Enviado:</b> ${input.value}`);
+        log(`<b>Tú envías:</b> ${input.value}`);
         input.value = '';
       }
     }
