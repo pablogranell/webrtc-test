@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Prueba WebRTC P2P Directa</title>
-  <!-- Librería MQTT ligera para señalización P2P vía HTTPS/WSS (Sin registro) -->
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <style>
     body { font-family: Arial, sans-serif; max-width: 500px; margin: 20px auto; padding: 15px; background: #f4f6f9; }
@@ -42,16 +41,20 @@
   </div>
 
   <script>
+    const myId = Math.random().toString(36).substring(7); // ID único para evitar bucles de eco
     let mqttClient = null;
     let pc = null;
     let dataChannel = null;
     let roomCode = "";
+    let iceCandidatesQueue = [];
 
-    // Servidores STUN públicos de Google para atravesar NATs / Routers
+    // Múltiples servidores STUN públicos para garantizar atravesar routers/4G
     const rtcConfig = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun.services.mozilla.com' }
       ]
     };
 
@@ -61,16 +64,15 @@
       logDiv.scrollTop = logDiv.scrollHeight;
     }
 
-    // MODO HOST (Gafa A / PC)
+    // MODO HOST
     function startHost() {
       roomCode = document.getElementById('code').value.trim();
       log(`Iniciando Host en la sala [${roomCode}]...`);
 
-      // Conexión al servidor de señalización por WebSocket Seguro (WSS)
       mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
 
       mqttClient.on('connect', () => {
-        log("Conectado al bus de señalización. Esperando cliente...");
+        log("Conectado a la red de señalización. Esperando cliente...");
         mqttClient.subscribe(`upv/vr/${roomCode}/join`);
         mqttClient.subscribe(`upv/vr/${roomCode}/answer`);
         mqttClient.subscribe(`upv/vr/${roomCode}/candidate_client`);
@@ -78,17 +80,17 @@
 
       mqttClient.on('message', async (topic, message) => {
         const payload = JSON.parse(message.toString());
+        if (payload.sender === myId) return; // Ignorar propios mensajes
 
-        if (topic === `upv/vr/${roomCode}/join`) {
-          log("Cliente detectado. Creando oferta WebRTC...");
+        if (topic === `upv/vr/${roomCode}/join` && !pc) {
+          log("Cliente detectado. Iniciando conexión WebRTC...");
           createHostOffer();
-        } else if (topic === `upv/vr/${roomCode}/answer`) {
-          log("Respuesta SDP recibida del cliente. Estableciendo túnel P2P...");
-          await pc.setRemoteDescription(new RTCSessionDescription(payload));
+        } else if (topic === `upv/vr/${roomCode}/answer` && pc && !pc.currentRemoteDescription) {
+          log("Respuesta SDP recibida. Configurando túnel...");
+          await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+          processIceQueue();
         } else if (topic === `upv/vr/${roomCode}/candidate_client`) {
-          if (pc && payload) {
-            await pc.addIceCandidate(new RTCIceCandidate(payload));
-          }
+          handleReceivedCandidate(payload.candidate);
         }
       });
     }
@@ -100,17 +102,17 @@
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          mqttClient.publish(`upv/vr/${roomCode}/candidate_host`, JSON.stringify(event.candidate));
+          mqttClient.publish(`upv/vr/${roomCode}/candidate_host`, JSON.stringify({ sender: myId, candidate: event.candidate }));
         }
       };
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      mqttClient.publish(`upv/vr/${roomCode}/offer`, JSON.stringify(offer));
+      mqttClient.publish(`upv/vr/${roomCode}/offer`, JSON.stringify({ sender: myId, sdp: offer }));
     }
 
-    // MODO CLIENTE (Gafa B / Móvil)
+    // MODO CLIENTE
     function startClient() {
       roomCode = document.getElementById('code').value.trim();
       log(`Buscando la sala [${roomCode}]...`);
@@ -122,20 +124,19 @@
         mqttClient.subscribe(`upv/vr/${roomCode}/offer`);
         mqttClient.subscribe(`upv/vr/${roomCode}/candidate_host`);
         
-        // Notificar al Host que se ha unido un cliente
-        mqttClient.publish(`upv/vr/${roomCode}/join`, JSON.stringify({ action: 'join' }));
+        // Notificar al Host
+        mqttClient.publish(`upv/vr/${roomCode}/join`, JSON.stringify({ sender: myId }));
       });
 
       mqttClient.on('message', async (topic, message) => {
         const payload = JSON.parse(message.toString());
+        if (payload.sender === myId) return; // Ignorar propios mensajes
 
-        if (topic === `upv/vr/${roomCode}/offer`) {
-          log("Oferta del Host recibida. Procesando...");
-          handleOfferAndAnswer(payload);
+        if (topic === `upv/vr/${roomCode}/offer` && !pc) {
+          log("Oferta recibida del Host. Procesando...");
+          handleOfferAndAnswer(payload.sdp);
         } else if (topic === `upv/vr/${roomCode}/candidate_host`) {
-          if (pc && payload) {
-            await pc.addIceCandidate(new RTCIceCandidate(payload));
-          }
+          handleReceivedCandidate(payload.candidate);
         }
       });
     }
@@ -150,21 +151,38 @@
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          mqttClient.publish(`upv/vr/${roomCode}/candidate_client`, JSON.stringify(event.candidate));
+          mqttClient.publish(`upv/vr/${roomCode}/candidate_client`, JSON.stringify({ sender: myId, candidate: event.candidate }));
         }
       };
 
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      processIceQueue();
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
-      mqttClient.publish(`upv/vr/${roomCode}/answer`, JSON.stringify(answer));
+      mqttClient.publish(`upv/vr/${roomCode}/answer`, JSON.stringify({ sender: myId, sdp: answer }));
+    }
+
+    // Manejo seguro de candidatos de red para no perder ninguno
+    async function handleReceivedCandidate(candidate) {
+      if (pc && pc.remoteDescription) {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } else {
+        iceCandidatesQueue.push(candidate);
+      }
+    }
+
+    async function processIceQueue() {
+      while (iceCandidatesQueue.length > 0) {
+        const candidate = iceCandidatesQueue.shift();
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      }
     }
 
     function setupDataChannelEvents() {
       dataChannel.onopen = () => {
         log("<b style='color:#00ff00'>¡ENLACE WEBRTC P2P CONECTADO!</b>");
-        log("Servidores de señalización desconectados. Comunicación 100% directa.");
         document.getElementById('chat').style.display = 'block';
       };
 
