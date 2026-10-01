@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Prueba WebRTC P2P Directa</title>
+  <title>Prueba WebRTC - Diagnóstico de Red</title>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <style>
     body { font-family: Arial, sans-serif; max-width: 500px; margin: 20px auto; padding: 15px; background: #f4f6f9; }
@@ -14,13 +14,13 @@
     .btn-host { background-color: #28a745; }
     .btn-client { background-color: #007bff; }
     .btn-send { background-color: #6c757d; }
-    #log { background: #1e1e1e; color: #33ff33; padding: 12px; height: 220px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; border-radius: 6px; }
+    #log { background: #1e1e1e; color: #33ff33; padding: 12px; height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; border-radius: 6px; }
   </style>
 </head>
 <body>
 
   <div class="card">
-    <h2>Prueba WebRTC P2P Directa</h2>
+    <h2>Prueba WebRTC (Diagnóstico)</h2>
     
     <div>
       <label><b>Código de 4 dígitos:</b></label>
@@ -36,25 +36,22 @@
       <button class="btn-send" onclick="sendMessage()">Enviar Mensaje Directo</button>
     </div>
 
-    <h3>Log de Eventos:</h3>
+    <h3>Log de Eventos (Estado de Red):</h3>
     <div id="log"></div>
   </div>
 
   <script>
-    const myId = Math.random().toString(36).substring(7); // ID único para evitar bucles de eco
+    const myId = Math.random().toString(36).substring(7);
     let mqttClient = null;
     let pc = null;
     let dataChannel = null;
     let roomCode = "";
     let iceCandidatesQueue = [];
 
-    // Múltiples servidores STUN públicos para garantizar atravesar routers/4G
     const rtcConfig = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun.services.mozilla.com' }
+        { urls: 'stun:stun1.l.google.com:19302' }
       ]
     };
 
@@ -64,15 +61,26 @@
       logDiv.scrollTop = logDiv.scrollHeight;
     }
 
-    // MODO HOST
+    function monitorIceState() {
+      pc.oniceconnectionstatechange = () => {
+        const state = pc.iceConnectionState;
+        log(`<span style="color:#ffeb3b">Estado del túnel de red: <b>${state.toUpperCase()}</b></span>`);
+        
+        if (state === 'failed') {
+          log("<span style='color:#ff6b6b'><b>ERROR CRÍTICO:</b> La red o el router bloquean la conexión directa UDP P2P. Conecta ambos dispositivos a la misma red WiFi/Punto de Acceso del móvil para continuar.</span>");
+        } else if (state === 'connected' || state === 'completed') {
+          log("<span style='color:#00ffff'>Ruta P2P encontrada a través del router.</span>");
+        }
+      };
+    }
+
     function startHost() {
       roomCode = document.getElementById('code').value.trim();
-      log(`Iniciando Host en la sala [${roomCode}]...`);
+      log(`Iniciando Host... [ID: ${myId}]`);
 
       mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
-
       mqttClient.on('connect', () => {
-        log("Conectado a la red de señalización. Esperando cliente...");
+        log("Conectado a red MQTT.");
         mqttClient.subscribe(`upv/vr/${roomCode}/join`);
         mqttClient.subscribe(`upv/vr/${roomCode}/answer`);
         mqttClient.subscribe(`upv/vr/${roomCode}/candidate_client`);
@@ -80,13 +88,13 @@
 
       mqttClient.on('message', async (topic, message) => {
         const payload = JSON.parse(message.toString());
-        if (payload.sender === myId) return; // Ignorar propios mensajes
+        if (payload.sender === myId) return;
 
         if (topic === `upv/vr/${roomCode}/join` && !pc) {
-          log("Cliente detectado. Iniciando conexión WebRTC...");
+          log("Cliente llama a la puerta. Configurando WebRTC...");
           createHostOffer();
         } else if (topic === `upv/vr/${roomCode}/answer` && pc && !pc.currentRemoteDescription) {
-          log("Respuesta SDP recibida. Configurando túnel...");
+          log("Respuesta obtenida. Cruzando datos de red...");
           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
           processIceQueue();
         } else if (topic === `upv/vr/${roomCode}/candidate_client`) {
@@ -97,6 +105,8 @@
 
     async function createHostOffer() {
       pc = new RTCPeerConnection(rtcConfig);
+      monitorIceState();
+      
       dataChannel = pc.createDataChannel("VRData");
       setupDataChannelEvents();
 
@@ -108,32 +118,27 @@
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-
       mqttClient.publish(`upv/vr/${roomCode}/offer`, JSON.stringify({ sender: myId, sdp: offer }));
     }
 
-    // MODO CLIENTE
     function startClient() {
       roomCode = document.getElementById('code').value.trim();
-      log(`Buscando la sala [${roomCode}]...`);
+      log(`Iniciando Cliente... [ID: ${myId}]`);
 
       mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
-
       mqttClient.on('connect', () => {
-        log("Conectado a la red. Solicitando unirse al Host...");
+        log("Conectado a red MQTT. Solicitando unirse...");
         mqttClient.subscribe(`upv/vr/${roomCode}/offer`);
         mqttClient.subscribe(`upv/vr/${roomCode}/candidate_host`);
-        
-        // Notificar al Host
         mqttClient.publish(`upv/vr/${roomCode}/join`, JSON.stringify({ sender: myId }));
       });
 
       mqttClient.on('message', async (topic, message) => {
         const payload = JSON.parse(message.toString());
-        if (payload.sender === myId) return; // Ignorar propios mensajes
+        if (payload.sender === myId) return;
 
         if (topic === `upv/vr/${roomCode}/offer` && !pc) {
-          log("Oferta recibida del Host. Procesando...");
+          log("Oferta del Host recibida.");
           handleOfferAndAnswer(payload.sdp);
         } else if (topic === `upv/vr/${roomCode}/candidate_host`) {
           handleReceivedCandidate(payload.candidate);
@@ -143,6 +148,7 @@
 
     async function handleOfferAndAnswer(offer) {
       pc = new RTCPeerConnection(rtcConfig);
+      monitorIceState();
 
       pc.ondatachannel = (event) => {
         dataChannel = event.channel;
@@ -160,14 +166,12 @@
 
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-
       mqttClient.publish(`upv/vr/${roomCode}/answer`, JSON.stringify({ sender: myId, sdp: answer }));
     }
 
-    // Manejo seguro de candidatos de red para no perder ninguno
     async function handleReceivedCandidate(candidate) {
       if (pc && pc.remoteDescription) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => log(`Error ICE: ${e}`));
       } else {
         iceCandidatesQueue.push(candidate);
       }
@@ -176,16 +180,15 @@
     async function processIceQueue() {
       while (iceCandidatesQueue.length > 0) {
         const candidate = iceCandidatesQueue.shift();
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => log(`Error ICE Queue: ${e}`));
       }
     }
 
     function setupDataChannelEvents() {
       dataChannel.onopen = () => {
-        log("<b style='color:#00ff00'>¡ENLACE WEBRTC P2P CONECTADO!</b>");
+        log("<b style='color:#00ff00'>¡ENLACE WEBRTC P2P ESTABLECIDO!</b>");
         document.getElementById('chat').style.display = 'block';
       };
-
       dataChannel.onmessage = (e) => {
         log(`<span style='color:#00ffff'><b>Recibido P2P:</b> ${e.data}</span>`);
       };
