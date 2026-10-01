@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prueba WebRTC P2P (PC / Móvil / VR)</title>
+  <!-- Cargamos la librería PeerJS desde CDN pública -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 500px; margin: 20px auto; padding: 15px; background: #f4f6f9; }
+    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    input, button { padding: 12px; margin: 6px 0; width: 100%; box-sizing: border-box; font-size: 15px; border-radius: 6px; }
+    input { border: 1px solid #ccc; }
+    button { border: none; font-weight: bold; cursor: pointer; color: white; }
+    .btn-host { background-color: #28a745; }
+    .btn-client { background-color: #007bff; }
+    .btn-send { background-color: #6c757d; }
+    #log { background: #1e1e1e; color: #33ff33; padding: 12px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h2>Prueba WebRTC P2P (PeerJS)</h2>
+    <p style="font-size: 12px; color: #666;">⚠️️ Recuerda abrir este archivo a través de <b>https://</b> en el teléfono móvil para que el navegador no bloquee WebRTC.</p>
+    
+    <div>
+      <label><b>Código de 4 dígitos:</b></label>
+      <input type="text" id="code" value="4921" maxlength="4">
+      
+      <button class="btn-host" onclick="startHost()">1. Crear Sala (Host)</button>
+      <button class="btn-client" onclick="startClient()">2. Unirse a Sala (Cliente)</button>
+    </div>
+
+    <div id="chat" style="display:none; margin-top:15px;">
+      <hr>
+      <input type="text" id="msgInput" placeholder="Escribe un mensaje para enviar P2P...">
+      <button class="btn-send" onclick="sendMessage()">Enviar Mensaje</button>
+    </div>
+
+    <h3>Log de Eventos:</h3>
+    <div id="log"></div>
+  </div>
+
+  <script>
+    let peer = null;
+    let conn = null;
+
+    // Configuración con servidores STUN públicos de Google para conectar dispositivos en redes/NATs distintas
+    const peerConfig = {
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' }
+        ]
+      }
+    };
+
+    function log(txt) {
+      const logDiv = document.getElementById('log');
+      logDiv.innerHTML += `> ${txt}<br>`;
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    function getPeerId(code) {
+      return `upv-vr-room-${code}`;
+    }
+
+    // MODO HOST (Dispositivo 1: PC o Gafa)
+    function startHost() {
+      const code = document.getElementById('code').value;
+      const peerId = getPeerId(code);
+
+      log("Conectando con el servidor público de PeerJS...");
+      peer = new Peer(peerId, peerConfig);
+
+      peer.on('open', (id) => {
+        log(`<b>HOST listo.</b> Código asignado: <b>${code}</b>. Esperando al cliente...`);
+      });
+
+      peer.on('connection', (connection) => {
+        conn = connection;
+        setupEvents("¡Dispositivo cliente conectado correctamente!");
+      });
+
+      peer.on('error', (err) => log(`<span style="color:#ff6b6b">Error: ${err.type}</span>`));
+    }
+
+    // MODO CLIENTE (Dispositivo 2: Móvil o PC)
+    function startClient() {
+      const code = document.getElementById('code').value;
+      const hostPeerId = getPeerId(code);
+
+      log("Conectando con el servidor público de PeerJS...");
+      peer = new Peer(peerConfig);
+
+      peer.on('open', () => {
+        log(`Buscando al Host con código ${code}...`);
+        conn = peer.connect(hostPeerId, { reliable: true });
+        setupEvents("¡Conectado exitosamente con el Host!");
+      });
+
+      peer.on('error', (err) => log(`<span style="color:#ff6b6b">Error de conexión: ${err.type}</span>`));
+    }
+
+    // Configurar canal de datos P2P
+    function setupEvents(successMsg) {
+      conn.on('open', () => {
+        log(`<b style="color:#00ff00">${successMsg}</b>`);
+        log("<b>Estado:</b> Enlace directo WebRTC P2P activo.");
+        document.getElementById('chat').style.display = 'block';
+      });
+
+      conn.on('data', (data) => {
+        log(`<span style="color:#00ffff"><b>Recibido P2P:</b> ${data}</span>`);
+      });
+
+      conn.on('close', () => log("Conexión P2P cerrada."));
+    }
+
+    // Enviar mensaje directo P2P
+    function sendMessage() {
+      const input = document.getElementById('msgInput');
+      if (conn && conn.open && input.value.trim() !== '') {
+        conn.send(input.value);
+        log(`<b>Enviado P2P:</b> ${input.value}`);
+        input.value = '';
+      }
+    }
+  </script>
+</body>
+</html>
