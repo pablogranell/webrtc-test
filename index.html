@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Prueba WebRTC - Diagnóstico de Red</title>
+  <title>Prueba WebRTC - Bypass UPVNET (TURN)</title>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <style>
     body { font-family: Arial, sans-serif; max-width: 500px; margin: 20px auto; padding: 15px; background: #f4f6f9; }
@@ -20,7 +20,7 @@
 <body>
 
   <div class="card">
-    <h2>Prueba WebRTC (Diagnóstico)</h2>
+    <h2>Prueba WebRTC (Bypass Red Estricta)</h2>
     
     <div>
       <label><b>Código de 4 dígitos:</b></label>
@@ -33,7 +33,7 @@
     <div id="chat" style="display:none; margin-top:15px;">
       <hr>
       <input type="text" id="msgInput" placeholder="Escribe un mensaje P2P...">
-      <button class="btn-send" onclick="sendMessage()">Enviar Mensaje Directo</button>
+      <button class="btn-send" onclick="sendMessage()">Enviar Mensaje</button>
     </div>
 
     <h3>Log de Eventos (Estado de Red):</h3>
@@ -48,10 +48,19 @@
     let roomCode = "";
     let iceCandidatesQueue = [];
 
+    // STUN para redes normales y TURN (OpenRelay) para saltar firewalls como UPVNET
     const rtcConfig = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
+        {
+          urls: [
+            "turn:openrelay.metered.ca:80",
+            "turn:openrelay.metered.ca:443",
+            "turn:openrelay.metered.ca:443?transport=tcp"
+          ],
+          username: "openrelayproject",
+          credential: "openrelayproject"
+        }
       ]
     };
 
@@ -67,9 +76,9 @@
         log(`<span style="color:#ffeb3b">Estado del túnel de red: <b>${state.toUpperCase()}</b></span>`);
         
         if (state === 'failed') {
-          log("<span style='color:#ff6b6b'><b>ERROR CRÍTICO:</b> La red o el router bloquean la conexión directa UDP P2P. Conecta ambos dispositivos a la misma red WiFi/Punto de Acceso del móvil para continuar.</span>");
+          log("<span style='color:#ff6b6b'><b>ERROR:</b> Ni siquiera el servidor TURN pudo saltar el bloqueo.</span>");
         } else if (state === 'connected' || state === 'completed') {
-          log("<span style='color:#00ffff'>Ruta P2P encontrada a través del router.</span>");
+          log("<span style='color:#00ffff'>Ruta encontrada con éxito (Posiblemente usando TURN).</span>");
         }
       };
     }
@@ -91,10 +100,10 @@
         if (payload.sender === myId) return;
 
         if (topic === `upv/vr/${roomCode}/join` && !pc) {
-          log("Cliente llama a la puerta. Configurando WebRTC...");
+          log("Cliente detectado. Configurando WebRTC con TURN...");
           createHostOffer();
         } else if (topic === `upv/vr/${roomCode}/answer` && pc && !pc.currentRemoteDescription) {
-          log("Respuesta obtenida. Cruzando datos de red...");
+          log("Respuesta obtenida. Negociando ruta de red...");
           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
           processIceQueue();
         } else if (topic === `upv/vr/${roomCode}/candidate_client`) {
@@ -198,7 +207,7 @@
       const input = document.getElementById('msgInput');
       if (dataChannel && dataChannel.readyState === 'open' && input.value.trim() !== '') {
         dataChannel.send(input.value);
-        log(`<b>Enviado P2P:</b> ${input.value}`);
+        log(`<b>Enviado:</b> ${input.value}`);
         input.value = '';
       }
     }
