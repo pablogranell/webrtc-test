@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Prueba WebRTC P2P (PC / Móvil / VR)</title>
-  <!-- Cargamos la librería PeerJS desde CDN pública -->
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <title>Prueba WebRTC P2P Directa</title>
+  <!-- Librería MQTT ligera para señalización P2P vía HTTPS/WSS (Sin registro) -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <style>
     body { font-family: Arial, sans-serif; max-width: 500px; margin: 20px auto; padding: 15px; background: #f4f6f9; }
     .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
@@ -15,14 +15,13 @@
     .btn-host { background-color: #28a745; }
     .btn-client { background-color: #007bff; }
     .btn-send { background-color: #6c757d; }
-    #log { background: #1e1e1e; color: #33ff33; padding: 12px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; border-radius: 6px; }
+    #log { background: #1e1e1e; color: #33ff33; padding: 12px; height: 220px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; border-radius: 6px; }
   </style>
 </head>
 <body>
 
   <div class="card">
-    <h2>Prueba WebRTC P2P (PeerJS)</h2>
-    <p style="font-size: 12px; color: #666;">⚠️️ Recuerda abrir este archivo a través de <b>https://</b> en el teléfono móvil para que el navegador no bloquee WebRTC.</p>
+    <h2>Prueba WebRTC P2P Directa</h2>
     
     <div>
       <label><b>Código de 4 dígitos:</b></label>
@@ -34,8 +33,8 @@
 
     <div id="chat" style="display:none; margin-top:15px;">
       <hr>
-      <input type="text" id="msgInput" placeholder="Escribe un mensaje para enviar P2P...">
-      <button class="btn-send" onclick="sendMessage()">Enviar Mensaje</button>
+      <input type="text" id="msgInput" placeholder="Escribe un mensaje P2P...">
+      <button class="btn-send" onclick="sendMessage()">Enviar Mensaje Directo</button>
     </div>
 
     <h3>Log de Eventos:</h3>
@@ -43,18 +42,17 @@
   </div>
 
   <script>
-    let peer = null;
-    let conn = null;
+    let mqttClient = null;
+    let pc = null;
+    let dataChannel = null;
+    let roomCode = "";
 
-    // Configuración con servidores STUN públicos de Google para conectar dispositivos en redes/NATs distintas
-    const peerConfig = {
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' }
-        ]
-      }
+    // Servidores STUN públicos de Google para atravesar NATs / Routers
+    const rtcConfig = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
     };
 
     function log(txt) {
@@ -63,67 +61,122 @@
       logDiv.scrollTop = logDiv.scrollHeight;
     }
 
-    function getPeerId(code) {
-      return `upv-vr-room-${code}`;
-    }
-
-    // MODO HOST (Dispositivo 1: PC o Gafa)
+    // MODO HOST (Gafa A / PC)
     function startHost() {
-      const code = document.getElementById('code').value;
-      const peerId = getPeerId(code);
+      roomCode = document.getElementById('code').value.trim();
+      log(`Iniciando Host en la sala [${roomCode}]...`);
 
-      log("Conectando con el servidor público de PeerJS...");
-      peer = new Peer(peerId, peerConfig);
+      // Conexión al servidor de señalización por WebSocket Seguro (WSS)
+      mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
 
-      peer.on('open', (id) => {
-        log(`<b>HOST listo.</b> Código asignado: <b>${code}</b>. Esperando al cliente...`);
+      mqttClient.on('connect', () => {
+        log("Conectado al bus de señalización. Esperando cliente...");
+        mqttClient.subscribe(`upv/vr/${roomCode}/join`);
+        mqttClient.subscribe(`upv/vr/${roomCode}/answer`);
+        mqttClient.subscribe(`upv/vr/${roomCode}/candidate_client`);
       });
 
-      peer.on('connection', (connection) => {
-        conn = connection;
-        setupEvents("¡Dispositivo cliente conectado correctamente!");
-      });
+      mqttClient.on('message', async (topic, message) => {
+        const payload = JSON.parse(message.toString());
 
-      peer.on('error', (err) => log(`<span style="color:#ff6b6b">Error: ${err.type}</span>`));
+        if (topic === `upv/vr/${roomCode}/join`) {
+          log("Cliente detectado. Creando oferta WebRTC...");
+          createHostOffer();
+        } else if (topic === `upv/vr/${roomCode}/answer`) {
+          log("Respuesta SDP recibida del cliente. Estableciendo túnel P2P...");
+          await pc.setRemoteDescription(new RTCSessionDescription(payload));
+        } else if (topic === `upv/vr/${roomCode}/candidate_client`) {
+          if (pc && payload) {
+            await pc.addIceCandidate(new RTCIceCandidate(payload));
+          }
+        }
+      });
     }
 
-    // MODO CLIENTE (Dispositivo 2: Móvil o PC)
+    async function createHostOffer() {
+      pc = new RTCPeerConnection(rtcConfig);
+      dataChannel = pc.createDataChannel("VRData");
+      setupDataChannelEvents();
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          mqttClient.publish(`upv/vr/${roomCode}/candidate_host`, JSON.stringify(event.candidate));
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      mqttClient.publish(`upv/vr/${roomCode}/offer`, JSON.stringify(offer));
+    }
+
+    // MODO CLIENTE (Gafa B / Móvil)
     function startClient() {
-      const code = document.getElementById('code').value;
-      const hostPeerId = getPeerId(code);
+      roomCode = document.getElementById('code').value.trim();
+      log(`Buscando la sala [${roomCode}]...`);
 
-      log("Conectando con el servidor público de PeerJS...");
-      peer = new Peer(peerConfig);
+      mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
 
-      peer.on('open', () => {
-        log(`Buscando al Host con código ${code}...`);
-        conn = peer.connect(hostPeerId, { reliable: true });
-        setupEvents("¡Conectado exitosamente con el Host!");
+      mqttClient.on('connect', () => {
+        log("Conectado a la red. Solicitando unirse al Host...");
+        mqttClient.subscribe(`upv/vr/${roomCode}/offer`);
+        mqttClient.subscribe(`upv/vr/${roomCode}/candidate_host`);
+        
+        // Notificar al Host que se ha unido un cliente
+        mqttClient.publish(`upv/vr/${roomCode}/join`, JSON.stringify({ action: 'join' }));
       });
 
-      peer.on('error', (err) => log(`<span style="color:#ff6b6b">Error de conexión: ${err.type}</span>`));
+      mqttClient.on('message', async (topic, message) => {
+        const payload = JSON.parse(message.toString());
+
+        if (topic === `upv/vr/${roomCode}/offer`) {
+          log("Oferta del Host recibida. Procesando...");
+          handleOfferAndAnswer(payload);
+        } else if (topic === `upv/vr/${roomCode}/candidate_host`) {
+          if (pc && payload) {
+            await pc.addIceCandidate(new RTCIceCandidate(payload));
+          }
+        }
+      });
     }
 
-    // Configurar canal de datos P2P
-    function setupEvents(successMsg) {
-      conn.on('open', () => {
-        log(`<b style="color:#00ff00">${successMsg}</b>`);
-        log("<b>Estado:</b> Enlace directo WebRTC P2P activo.");
+    async function handleOfferAndAnswer(offer) {
+      pc = new RTCPeerConnection(rtcConfig);
+
+      pc.ondatachannel = (event) => {
+        dataChannel = event.channel;
+        setupDataChannelEvents();
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          mqttClient.publish(`upv/vr/${roomCode}/candidate_client`, JSON.stringify(event.candidate));
+        }
+      };
+
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      mqttClient.publish(`upv/vr/${roomCode}/answer`, JSON.stringify(answer));
+    }
+
+    function setupDataChannelEvents() {
+      dataChannel.onopen = () => {
+        log("<b style='color:#00ff00'>¡ENLACE WEBRTC P2P CONECTADO!</b>");
+        log("Servidores de señalización desconectados. Comunicación 100% directa.");
         document.getElementById('chat').style.display = 'block';
-      });
+      };
 
-      conn.on('data', (data) => {
-        log(`<span style="color:#00ffff"><b>Recibido P2P:</b> ${data}</span>`);
-      });
-
-      conn.on('close', () => log("Conexión P2P cerrada."));
+      dataChannel.onmessage = (e) => {
+        log(`<span style='color:#00ffff'><b>Recibido P2P:</b> ${e.data}</span>`);
+      };
     }
 
-    // Enviar mensaje directo P2P
     function sendMessage() {
       const input = document.getElementById('msgInput');
-      if (conn && conn.open && input.value.trim() !== '') {
-        conn.send(input.value);
+      if (dataChannel && dataChannel.readyState === 'open' && input.value.trim() !== '') {
+        dataChannel.send(input.value);
         log(`<b>Enviado P2P:</b> ${input.value}`);
         input.value = '';
       }
