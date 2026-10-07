@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prueba WebRTC P2P</title>
+<style>
+  :root{
+    --bg:#0b1020; --card:#151c30; --border:#2a3554;
+    --text:#e6ebf5; --muted:#8b97b3; --acc:#3b82f6;
+    --ok:#22c55e; --bad:#ef4444;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);padding:16px;max-width:900px;margin:0 auto}
+  h1{font-size:1.3rem;margin:8px 0}
+  .pill{display:inline-block;padding:4px 12px;border-radius:999px;font-size:.85rem;border:1px solid var(--border);color:var(--muted);margin-bottom:12px}
+  .pill.ok{background:rgba(34,197,94,.15);border-color:var(--ok);color:var(--ok)}
+  .pill.err{background:rgba(239,68,68,.15);border-color:var(--bad);color:var(--bad)}
+  .videos{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+  @media(max-width:640px){.videos{grid-template-columns:1fr}}
+  .vbox{background:#000;border:1px solid var(--border);border-radius:8px;overflow:hidden;position:relative}
+  .vbox video{width:100%;aspect-ratio:4/3;object-fit:cover;background:#000}
+  .vbox span{position:absolute;top:6px;left:8px;font-size:.72rem;background:rgba(0,0,0,.55);padding:2px 8px;border-radius:4px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px}
+  .card h3{margin:0 0 8px;font-size:.95rem;color:var(--muted);font-weight:600}
+  button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:10px 16px;font-size:.95rem;cursor:pointer;width:100%}
+  button:disabled{opacity:.4;cursor:default}
+  button.ghost{background:transparent;border:1px solid var(--border);color:var(--text);font-size:.8rem;padding:6px 10px;width:auto}
+  textarea{width:100%;min-height:70px;background:#0b1120;border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px;font-size:.75rem;font-family:monospace;resize:vertical}
+  .row{display:flex;gap:8px;margin-top:8px}
+  .muted{color:var(--muted);font-size:.8rem}
+  #chat{max-height:180px;overflow-y:auto;background:#0b1120;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:.85rem;margin-bottom:8px}
+  #chat div{margin-bottom:4px;word-break:break-word}
+  #chat .me{color:#93c5fd}
+  #chat .them{color:#86efac}
+  input[type=text]{flex:1;background:#0b1120;border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px;font-size:.9rem}
+  .hidden{display:none}
+  .foot{margin-top:16px}
+</style>
+</head>
+<body>
+
+<h1>Prueba WebRTC P2P</h1>
+<div class="pill" id="status">Estado: no iniciado (requiere HTTPS y permisos de cámara)</div>
+
+<div class="videos">
+  <div class="vbox"><video id="local" autoplay muted playsinline></video><span>Cámara local</span></div>
+  <div class="vbox"><video id="remote" autoplay playsinline></video><span>Remoto</span></div>
+</div>
+
+<div class="card">
+  <button id="btnCam">1. Activar cámara y micrófono</button>
+</div>
+
+<div class="videos">
+  <div class="card">
+    <h3>Dispositivo A (anfitrión)</h3>
+    <button id="btnOffer" class="hidden">2. Generar código de invitación</button>
+    <div class="row hidden" id="offerOutWrap">
+      <textarea id="offerOut" readonly placeholder="Tu código de invitación"></textarea>
+      <button id="copyOffer" class="ghost" style="align-self:flex-start">Copiar</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Dispositivo B (invitado)</h3>
+    <textarea id="offerIn" placeholder="Pega aquí el código de invitación del dispositivo A"></textarea>
+    <div class="row">
+      <button id="btnAnswer">3. Crear respuesta</button>
+    </div>
+    <div class="row hidden" id="answerOutWrap">
+      <textarea id="answerOut" readonly placeholder="Tu código de respuesta"></textarea>
+      <button id="copyAnswer" class="ghost" style="align-self:flex-start">Copiar</button>
+    </div>
+  </div>
+</div>
+
+<div class="card hidden" id="confirmCard">
+  <h3>Dispositivo A (anfitrión)</h3>
+  <textarea id="answerIn" placeholder="Pega aquí el código de respuesta del dispositivo B"></textarea>
+  <div class="row">
+    <button id="btnConfirm">4. Confirmar conexión</button>
+  </div>
+</div>
+
+<div class="card hidden" id="chatCard">
+  <h3>Chat de datos (canal P2P)</h3>
+  <div id="chat"><span class="muted">Escribe para probar el canal de datos.</span></div>
+  <div class="row">
+    <input type="text" id="chatIn" placeholder="Mensaje...">
+    <button id="btnSend">Enviar</button>
+  </div>
+</div>
+
+<div class="card">
+  <span class="muted" id="meta">ICE: — | RTT: — | Candidatos locales: —</span>
+  <div class="row">
+    <button id="btnReset" class="ghost" style="align-self:flex-start">Reiniciar (recarga la página)</button>
+  </div>
+  <p class="muted">Señalización manual (copiar/pegar) y STUN público. Toda la comunicación de datos y vídeo va directamente entre los dos dispositivos.</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const statusEl = $('status'), metaEl = $('meta');
+const localVideo = $('local'), remoteVideo = $('remote');
+
+let pc = null, dc = null, localStream = null, role = null, pingTimer = null;
+
+const RTCConfig = { iceServers: [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun.l.google.com:19302?transport=udp' },
+  { urls: 'stun1.l.google.com:19302' },
+  { urls: 'stun2.l.google.com:19302' },
+  { urls: 'stun3.l.google.com:19302' },
+  { urls: 'stun:global.stun.twilio.com:3478' }
+]};
+
+function setStatus(txt, cls){ statusEl.textContent = 'Estado: ' + txt; statusEl.className = 'pill' + (cls ? ' ' + cls : ''); }
+function countCandidates(desc){ return (desc?.sdp?.match(/^a=candidate/mg) || []).length; }
+function updateMeta(){
+  const sdp = pc?.localDescription?.sdp;
+  metaEl.textContent = `ICE: ${pc ? pc.iceConnectionState : '—'} | RTT: ${window._rtt ?? '—'} | Candidatos locales: ${sdp ? countCandidates(pc.localDescription) : '—'}`;
+}
+
+const enc = d => btoa(unescape(encodeURIComponent(JSON.stringify(d))));
+const dec = s => { try { return JSON.parse(decodeURIComponent(escape(atob(s.trim())))); } catch(e){ throw new Error('Código no válido'); } };
+
+function waitGathering(timeout = 4000){
+  return new Promise(res => {
+    if (!pc || pc.iceGatheringState === 'complete') return res();
+    const t = setTimeout(res, timeout);
+    const iv = setInterval(() => {
+      if (pc.iceGatheringState === 'complete') { clearTimeout(t); clearInterval(iv); res(); }
+    }, 100);
+  });
+}
+
+$('btnCam').onclick = async () => {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: true });
+    localVideo.srcObject = localStream;
+    $('btnOffer').classList.remove('hidden');
+    setStatus('cámara activa, elige un rol');
+  } catch(e){
+    setStatus('no se pudo acceder a la cámara: ' + e.message, 'err');
+  }
+};
+
+function newPC(){
+  pc = new RTCPeerConnection(RTCConfig);
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  pc.ontrack = e => { remoteVideo.srcObject = e.streams[0]; };
+  pc.oniceconnectionstatechange = () => {
+    if (!pc) return;
+    const s = pc.iceConnectionState;
+    if (s === 'connected' || s === 'completed') setStatus('conectado (P2P)', 'ok');
+    else if (s === 'failed') setStatus('falló la conexión ICE', 'err');
+    else if (s === 'disconnected') setStatus('desconectado', 'err');
+    else setStatus(s, '');
+    updateMeta();
+  };
+  pc.onconnectionstatechange = () => updateMeta();
+}
+
+function setupDC(channel){
+  dc = channel;
+  dc.onopen = () => {
+    $('chatCard').classList.remove('hidden');
+    setStatus('conectado (P2P)', 'ok');
+    if (!pingTimer) pingTimer = setInterval(() => {
+      if (dc && dc.readyState === 'open') dc.send(JSON.stringify({ t: 'ping', ts: Date.now() }));
+    }, 1000);
+  };
+  dc.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.t === 'ping') dc.send(JSON.stringify({ t: 'pong', ts: m.ts }));
+    else if (m.t === 'pong') {
+      window._rtt = (Date.now() - m.ts) + ' ms';
+      updateMeta();
+    } else if (m.t === 'chat') addMsg(m.msg, false);
+  };
+  dc.onclose = () => setStatus('canal de datos cerrado', 'err');
+}
+
+async function gatherAndPublish(out){
+  await waitGathering();
+  out.value = enc(pc.localDescription);
+  out.parentElement.classList.remove('hidden');
+  updateMeta();
+}
+
+$('btnOffer').onclick = async () => {
+  if (!localStream) return setStatus('activa la cámara primero', 'err');
+  try {
+    role = 'anfitrión';
+    newPC();
+    setupDC(pc.createDataChannel('chat'));
+    await pc.setLocalDescription(await pc.createOffer());
+    await gatherAndPublish($('offerOut'));
+    $('confirmCard').classList.remove('hidden');
+    setStatus('código de invitación generado, compártelo con el dispositivo B', 'ok');
+  } catch(e){ setStatus('error al crear la oferta: ' + e.message, 'err'); }
+};
+
+$('btnAnswer').onclick = async () => {
+  if (!localStream) return setStatus('activa la cámara primero', 'err');
+  try {
+    role = 'invitado';
+    newPC();
+    pc.ondatachannel = e => setupDC(e.channel);
+    await pc.setRemoteDescription(dec($('offerIn').value));
+    await pc.setLocalDescription(await pc.createAnswer());
+    await gatherAndPublish($('answerOut'));
+    setStatus('respuesta creada, envía el código al dispositivo A (la conexión puede establecerse ya)', 'ok');
+  } catch(e){ setStatus('error al crear la respuesta: ' + e.message, 'err'); }
+};
+
+$('btnConfirm').onclick = async () => {
+  try {
+    if (!pc) return setStatus('genera primero el código de invitación', 'err');
+    await pc.setRemoteDescription(dec($('answerIn').value));
+    setStatus('esperando conexión ICE...', '');
+  } catch(e){ setStatus('error al confirmar: ' + e.message, 'err'); }
+};
+
+function addMsg(msg, me){
+  const chat = $('chat');
+  const first = chat.querySelector('.muted'); if (first) first.remove();
+  const div = document.createElement('div');
+  div.className = me ? 'me' : 'them';
+  div.textContent = (me ? 'Yo: ' : 'Remoto: ') + msg;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function sendChat(){
+  const v = $('chatIn').value.trim();
+  if (!v || !dc || dc.readyState !== 'open') return;
+  dc.send(JSON.stringify({ t: 'chat', msg: v }));
+  addMsg(v, true);
+  $('chatIn').value = '';
+}
+$('btnSend').onclick = sendChat;
+$('chatIn').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+async function copyText(btn, area){
+  try { await navigator.clipboard.writeText(area.value); }
+  catch { area.select(); document.execCommand('copy'); }
+  btn.textContent = 'Copiado';
+  setTimeout(() => btn.textContent = 'Copiar', 1200);
+}
+$('copyOffer').onclick = e => copyText(e.target, $('offerOut'));
+$('copyAnswer').onclick = e => copyText(e.target, $('answerOut'));
+
+$('btnReset').onclick = () => location.reload();
+
+setInterval(updateMeta, 2000);
+</script>
+</body>
+</html>
