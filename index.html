@@ -89,10 +89,8 @@ let pc = null, dc = null, pingTimer = null;
 
 const RTCConfig = { iceServers: [
   { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun1.l.google.com:19302' },
-  { urls: 'stun2.l.google.com:19302' },
-  { urls: 'stun3.l.google.com:19302' },
-  { urls: 'stun:global.stun.twilio.com:3478' }
+  { urls: 'stun:global.stun.twilio.com:3478' },
+  { urls: 'stun:stun.cloudflare.com:3478' }
 ]};
 
 function setStatus(txt, cls){ statusEl.textContent = 'Estado: ' + txt; statusEl.className = 'pill' + (cls ? ' ' + cls : ''); }
