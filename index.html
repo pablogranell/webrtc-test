@@ -81,6 +81,7 @@
   <div class="row">
     <button id="btnCopyLog" class="ghost">Copiar logs</button>
     <button id="btnClearLog" class="ghost">Limpiar</button>
+    <button id="btnRevealIp" class="ghost">Sonda IPv6 (pide micrófono)</button>
   </div>
   <p class="muted">Los mensajes del chat no se registran.</p>
 </div>
@@ -312,6 +313,34 @@ $('btnCopyLog').onclick = async () => {
   setTimeout(() => $('btnCopyLog').textContent = 'Copiar logs', 1200);
 };
 $('btnClearLog').onclick = () => { LOG_LINES.length = 0; $('log').textContent = ''; };
+
+// Con permiso de micrófono Chrome deja de ocultar las IP locales (mDNS). Esta sonda
+// cuenta candidatos locales por familia (ipv4, ipv6) sin mostrar direcciones.
+function probeLocalFamilies(){
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  pc.createDataChannel('local');
+  const fams = {};
+  let done = false;
+  const finish = () => { if (done) return; done = true; clearTimeout(t); log('Sonda local familias', fams); pc.close(); };
+  const t = setTimeout(finish, 8000);
+  pc.onicecandidate = e => {
+    if (!e.candidate) return finish();
+    const a = e.candidate.candidate.split(' ')[4];
+    const f = a.endsWith('.local') ? 'mdns' : a.includes(':') ? 'ipv6' : 'ipv4';
+    fams[f] = (fams[f] || 0) + 1;
+  };
+  pc.createOffer().then(o => pc.setLocalDescription(o)).catch(e => { log('Sonda local error', { message: e.message }); finish(); });
+}
+$('btnRevealIp').onclick = async () => {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach(tr => tr.stop());
+    log('Permiso de micrófono concedido');
+  } catch (e) {
+    log('Permiso de micrófono no concedido', { name: e.name });
+  }
+  probeLocalFamilies();
+};
 
 $('btnReset').onclick = () => location.reload();
 setInterval(updateMeta, 2000);
