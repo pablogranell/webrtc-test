@@ -106,11 +106,18 @@ log('Página cargada', { ua: navigator.userAgent, url: location.href, peerjs: ty
 
 let peer = null, conn = null, role = null, pingTimer = null;
 
+// TURN público (openrelay de Metered, credenciales publicas). Sirve de relay cuando
+// ambos extremos están detrás de NAT que impide la conexión directa (p. ej. datos móviles).
+// Es compartido y sin garantías; para uso serio conviene un coturn propio.
 const PEER_OPTS = { config: { iceServers: [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:global.stun.twilio.com:3478' },
-  { urls: 'stun:stun.cloudflare.com:3478' }
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
 ]}};
+const CONNECT_TIMEOUT_MS = 25000;
 
 function setStatus(txt, cls){ statusEl.textContent = 'Estado: ' + txt; statusEl.className = 'pill' + (cls ? ' ' + cls : ''); log('Estado: ' + txt); }
 function updateMeta(){ metaEl.textContent = `Estado: ${conn ? conn.open ? 'abierto' : 'cerrado' : '—'} | RTT: ${window._rtt ?? '—'}`; }
@@ -130,7 +137,17 @@ function setChatEnabled(on){
 function setupConn(c){
   conn = c;
   log('Conexión de datos creada', { peer: c.peer });
-  conn.on('iceStateChanged', s => log('ICE: ' + s));
+  conn.on('iceStateChanged', s => {
+    log('ICE: ' + s);
+    if (s === 'disconnected' && !conn.open) setStatus('ICE desconectado, esperando...', 'err');
+  });
+  const connectTimer = setTimeout(() => {
+    if (!conn.open) {
+      log('Tiempo de espera agotado sin canal abierto', { ms: CONNECT_TIMEOUT_MS });
+      setStatus('no se pudo establecer el canal (NAT o red bloqueada). Revisa los logs', 'err');
+    }
+  }, CONNECT_TIMEOUT_MS);
+  conn.on('open', () => clearTimeout(connectTimer));
   conn.on('open', () => {
     log('Canal P2P abierto');
     addMsg('Conectado. El canal P2P está abierto.', 'sys');
