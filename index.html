@@ -134,16 +134,34 @@ function setChatEnabled(on){
   if (on) $('chatIn').focus();
 }
 
+// Resumen de candidatos y pares ICE (sin direcciones IP) para diagnosticar NAT
+function dumpIce(){
+  const pc = conn && conn.peerConnection;
+  if (!pc) return log('ICE: sin RTCPeerConnection');
+  pc.getStats().then(rep => {
+    const local = {}, remote = {}, pairs = {};
+    rep.forEach(s => {
+      if (s.type === 'local-candidate') { const k = s.candidateType + '/' + s.protocol; local[k] = (local[k] || 0) + 1; }
+      else if (s.type === 'remote-candidate') { const k = s.candidateType + '/' + s.protocol; remote[k] = (remote[k] || 0) + 1; }
+      else if (s.type === 'candidate-pair') { pairs[s.state] = (pairs[s.state] || 0) + 1; }
+    });
+    log('ICE candidatos locales', local);
+    log('ICE candidatos remotos', remote);
+    log('ICE pares', pairs);
+  }).catch(e => log('ICE getStats error', { message: e.message }));
+}
+
 function setupConn(c){
   conn = c;
   log('Conexión de datos creada', { peer: c.peer });
   conn.on('iceStateChanged', s => {
     log('ICE: ' + s);
-    if (s === 'disconnected' && !conn.open) setStatus('ICE desconectado, esperando...', 'err');
+    if (s === 'disconnected' && !conn.open) { setStatus('ICE desconectado, esperando...', 'err'); dumpIce(); }
   });
   const connectTimer = setTimeout(() => {
     if (!conn.open) {
       log('Tiempo de espera agotado sin canal abierto', { ms: CONNECT_TIMEOUT_MS });
+      dumpIce();
       setStatus('no se pudo establecer el canal (NAT o red bloqueada). Revisa los logs', 'err');
     }
   }, CONNECT_TIMEOUT_MS);
