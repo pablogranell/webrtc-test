@@ -158,14 +158,18 @@ function dumpIce(){
   const pc = conn && conn.peerConnection;
   if (!pc) return log('ICE: sin RTCPeerConnection');
   pc.getStats().then(rep => {
-    const local = {}, remote = {}, pairs = {};
+    const local = {}, remote = {}, pairs = {}, familyLocal = {}, familyRemote = {};
+    // Familia de la direccion sin mostrarla: IPv6 si contiene ':', ocultas si es mDNS (.local) o no hay
+    const family = s => { const a = s.address || s.ip; if (!a) return 'oculta'; if (a.endsWith('.local')) return 'mdns'; return a.includes(':') ? 'ipv6' : 'ipv4'; };
     rep.forEach(s => {
-      if (s.type === 'local-candidate') { const k = s.candidateType + '/' + s.protocol; local[k] = (local[k] || 0) + 1; }
-      else if (s.type === 'remote-candidate') { const k = s.candidateType + '/' + s.protocol; remote[k] = (remote[k] || 0) + 1; }
+      if (s.type === 'local-candidate') { const k = s.candidateType + '/' + s.protocol; local[k] = (local[k] || 0) + 1; const f = family(s); familyLocal[f] = (familyLocal[f] || 0) + 1; }
+      else if (s.type === 'remote-candidate') { const k = s.candidateType + '/' + s.protocol; remote[k] = (remote[k] || 0) + 1; const f = family(s); familyRemote[f] = (familyRemote[f] || 0) + 1; }
       else if (s.type === 'candidate-pair') { pairs[s.state] = (pairs[s.state] || 0) + 1; }
     });
     log('ICE candidatos locales', local);
     log('ICE candidatos remotos', remote);
+    log('ICE familias locales', familyLocal);
+    log('ICE familias remotas', familyRemote);
     log('ICE pares', pairs);
   }).catch(e => log('ICE getStats error', { message: e.message }));
 }
