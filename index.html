@@ -32,6 +32,7 @@
   .msg.sys{margin:0 auto;background:transparent;color:var(--muted);font-size:.8rem;text-align:center}
   input[type=text]{flex:1;background:#0b1120;border:1px solid var(--border);border-radius:6px;color:var(--text);padding:10px;font-size:.95rem}
   input#joinCode{letter-spacing:.5em;font-family:monospace;font-size:1.3rem;text-align:center;text-transform:uppercase}
+  #log{height:200px;overflow-y:auto;background:#0b1120;border:1px solid var(--border);border-radius:6px;padding:8px;font-family:monospace;font-size:.7rem;white-space:pre-wrap;word-break:break-all;margin-bottom:8px}
 </style>
 </head>
 <body>
@@ -74,10 +75,34 @@
   <p class="muted">La señalización se enruta por el servidor público de PeerJS (solo para el saludo inicial); el chat viaja directamente entre los dispositivos por WebRTC.</p>
 </div>
 
+<div class="card">
+  <h3>Registro (logs)</h3>
+  <div id="log"></div>
+  <div class="row">
+    <button id="btnCopyLog" class="ghost">Copiar logs</button>
+    <button id="btnClearLog" class="ghost">Limpiar</button>
+  </div>
+  <p class="muted">Los mensajes del chat no se registran.</p>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const statusEl = $('status'), metaEl = $('meta'), chatEl = $('chat');
 const NS = 'webrtc-test-'; // prefijo del peer ID para no colisionar
+
+const LOG_LINES = [];
+function log(msg, data){
+  const line = `[${new Date().toISOString().slice(11, 23)}] ${msg}` + (data === undefined ? '' : ' ' + JSON.stringify(data));
+  LOG_LINES.push(line);
+  const div = document.createElement('div');
+  div.textContent = line;
+  $('log').appendChild(div);
+  $('log').scrollTop = $('log').scrollHeight;
+  console.log(line);
+}
+window.addEventListener('error', e => log('Error JS', { message: e.message, line: e.lineno }));
+window.addEventListener('unhandledrejection', e => log('Promesa no capturada', { reason: String((e.reason && e.reason.message) || e.reason) }));
+log('Página cargada', { ua: navigator.userAgent, url: location.href, peerjs: typeof Peer });
 
 let peer = null, conn = null, role = null, pingTimer = null;
 
@@ -87,7 +112,7 @@ const PEER_OPTS = { config: { iceServers: [
   { urls: 'stun:stun.cloudflare.com:3478' }
 ]}};
 
-function setStatus(txt, cls){ statusEl.textContent = 'Estado: ' + txt; statusEl.className = 'pill' + (cls ? ' ' + cls : ''); }
+function setStatus(txt, cls){ statusEl.textContent = 'Estado: ' + txt; statusEl.className = 'pill' + (cls ? ' ' + cls : ''); log('Estado: ' + txt); }
 function updateMeta(){ metaEl.textContent = `Estado: ${conn ? conn.open ? 'abierto' : 'cerrado' : '—'} | RTT: ${window._rtt ?? '—'}`; }
 function addMsg(text, cls){
   const div = document.createElement('div');
@@ -104,7 +129,10 @@ function setChatEnabled(on){
 
 function setupConn(c){
   conn = c;
+  log('Conexión de datos creada', { peer: c.peer });
+  conn.on('iceStateChanged', s => log('ICE: ' + s));
   conn.on('open', () => {
+    log('Canal P2P abierto');
     addMsg('Conectado. El canal P2P está abierto.', 'sys');
     setStatus('conectado (P2P)', 'ok');
     setChatEnabled(true);
@@ -119,7 +147,10 @@ function setupConn(c){
     else if (m.t === 'chat') addMsg(m.msg, 'them');
   });
   conn.on('close', () => { setStatus('conexión cerrada', 'err'); setChatEnabled(false); updateMeta(); });
-  conn.on('error', e => setStatus('error del canal: ' + e.message, 'err'));
+  conn.on('error', e => {
+    log('Error del canal', { type: e.type, message: e.message });
+    setStatus('error del canal: ' + e.message, 'err');
+  });
 }
 
 // --- Anfitrión ---
@@ -128,10 +159,12 @@ $('btnCreate').onclick = async () => {
   try {
     for (let i = 0; i < 10; i++) {
       const code = String(Math.floor(1000 + Math.random() * 9000));
+      log('Creando sala', { id: NS + code });
       const p = new Peer(NS + code, PEER_OPTS);
       const opened = await new Promise((res, rej) => {
-        p.on('open', () => res(true));
+        p.on('open', id => { log('Peer abierto (anfitrión)', { id }); res(true); });
         p.on('error', e => {
+          log('Error al crear sala', { type: e.type, message: e.message });
           if (e.type === 'unavailable-id') { p.destroy(); rej(new Error('id-taken')); }
           else { p.destroy(); rej(new Error(e.message || e.type)); }
         });
@@ -139,9 +172,10 @@ $('btnCreate').onclick = async () => {
       if (!opened) { setStatus(`el código ${code} estaba ocupado, reintentando...`); continue; }
 
       peer = p; role = 'host';
-      p.on('connection', c => setupConn(c));
-      p.on('disconnected', () => { if (peer) peer.reconnect(); });
+      p.on('connection', c => { log('Conexión entrante'); setupConn(c); });
+      p.on('disconnected', () => { log('Anfitrión desconectado del servidor, reconectando'); if (peer) peer.reconnect(); });
       p.on('error', e => {
+        log('Error del anfitrión', { type: e.type, message: e.message });
         if (e.type === 'peer-unavailable') addMsg('El invitado no está conectado aún.', 'sys');
         else setStatus('error: ' + (e.message || e.type), 'err');
       });
@@ -172,9 +206,11 @@ $('btnCopyCode').onclick = async () => {
 // --- Invitado ---
 function join(code){
   if (!/^\d{4}$/.test(code)) return setStatus('el código debe ser de 4 dígitos', 'err');
+  log('Uniéndose a sala', { id: NS + code });
   $('btnJoin').disabled = true;
   const p = new Peer(PEER_OPTS);
-  p.on('open', () => {
+  p.on('open', id => {
+    log('Peer abierto (invitado)', { id });
     const c = p.connect(NS + code, { reliable: true });
     setupConn(c);
     role = 'guest';
@@ -184,6 +220,7 @@ function join(code){
     $('btnJoin').disabled = false;
   });
   p.on('error', e => {
+    log('Error al unirse', { type: e.type, message: e.message });
     if (e.type === 'peer-unavailable') setStatus('no se encontró la sala, ¿el anfitrión está en línea?', 'err');
     else setStatus('error: ' + (e.message || e.type), 'err');
     p.destroy();
@@ -204,6 +241,19 @@ function sendChat(){
 }
 $('btnSend').onclick = sendChat;
 $('chatIn').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+$('btnCopyLog').onclick = async () => {
+  const text = LOG_LINES.join('\n');
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove();
+  }
+  $('btnCopyLog').textContent = 'Copiado';
+  setTimeout(() => $('btnCopyLog').textContent = 'Copiar logs', 1200);
+};
+$('btnClearLog').onclick = () => { LOG_LINES.length = 0; $('log').textContent = ''; };
 
 $('btnReset').onclick = () => location.reload();
 setInterval(updateMeta, 2000);
