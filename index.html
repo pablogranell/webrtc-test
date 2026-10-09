@@ -139,6 +139,12 @@ const PEER_OPTS = { config: { iceServers: [
 ]}};
 const CONNECT_TIMEOUT_MS = 25000;
 
+// Relay WebSocket de respaldo (carpeta relay/). Vacío = desactivado (solo P2P).
+// Pruebas sin tocar el código: ?relay=ws://localhost:8080 y ?forcerelay (solo relay, sin P2P).
+const _qs = new URLSearchParams(location.search);
+const RELAY_URL = _qs.get('relay') || '';
+const FORCE_RELAY = _qs.has('forcerelay');
+
 function setStatus(txt, cls){ statusEl.textContent = 'Estado: ' + txt; statusEl.className = 'pill' + (cls ? ' ' + cls : ''); log('Estado: ' + txt); }
 function updateMeta(){ metaEl.textContent = `Estado: ${conn ? conn.open ? 'abierto' : 'cerrado' : '—'} | RTT: ${window._rtt ?? '—'}`; }
 function addMsg(text, cls){
@@ -152,6 +158,35 @@ function setChatEnabled(on){
   $('chatIn').disabled = !on;
   $('btnSend').disabled = !on;
   if (on) $('chatIn').focus();
+}
+
+// --- Canal de respaldo por relay WebSocket ---
+let relay = null, relayPeerOn = false;
+const p2pOpen = () => !!(conn && conn.open);
+const relayOpen = () => !!(relay && relay.readyState === WebSocket.OPEN);
+
+// Estado y chat según el canal disponible; el P2P tiene prioridad sobre el relay
+function refreshChannel(){
+  if (p2pOpen()) setStatus('conectado (P2P)', 'ok');
+  else if (relayOpen()) relayPeerOn ? setStatus('conectado (relay)', 'ok') : setStatus('relay listo, esperando al otro extremo');
+  setChatEnabled(p2pOpen() || (relayOpen() && relayPeerOn));
+}
+
+function onData(raw, via){
+  const m = JSON.parse(raw);
+  if (m.t === 'ping' && via === 'p2p') conn.send(JSON.stringify({ t: 'pong', ts: m.ts }));
+  else if (m.t === 'pong' && via === 'p2p') { window._rtt = (Date.now() - m.ts) + ' ms'; updateMeta(); }
+  else if (m.t === 'presence' && via === 'relay') { relayPeerOn = m.on; log('Relay: otro extremo ' + (m.on ? 'presente' : 'ausente')); refreshChannel(); }
+  else if (m.t === 'chat') addMsg(m.msg, 'them');
+}
+
+function openRelay(room, r){
+  if (!RELAY_URL) return log('Relay no configurado; solo P2P');
+  relay = new WebSocket(`${RELAY_URL}?room=${encodeURIComponent(room)}&role=${r}`);
+  relay.onopen = () => { log('Relay conectado', { room, role: r }); refreshChannel(); };
+  relay.onmessage = e => { try { onData(e.data, 'relay'); } catch (err) { log('Relay: mensaje no válido', { message: err.message }); } };
+  relay.onclose = e => { log('Relay cerrado', { code: e.code, reason: e.reason }); relay = null; relayPeerOn = false; refreshChannel(); };
+  relay.onerror = () => log('Relay error');
 }
 
 // Resumen de candidatos y pares ICE (sin direcciones IP) para diagnosticar NAT
@@ -186,26 +221,26 @@ function setupConn(c){
     if (!conn.open) {
       log('Tiempo de espera agotado sin canal abierto', { ms: CONNECT_TIMEOUT_MS });
       dumpIce();
-      setStatus('no se pudo establecer el canal (NAT o red bloqueada). Revisa los logs', 'err');
+      if (relayOpen()) log('P2P no disponible; el chat usa el relay');
+      else setStatus('no se pudo establecer el canal (NAT o red bloqueada). Revisa los logs', 'err');
     }
   }, CONNECT_TIMEOUT_MS);
   conn.on('open', () => clearTimeout(connectTimer));
   conn.on('open', () => {
     log('Canal P2P abierto');
     addMsg('Conectado. El canal P2P está abierto.', 'sys');
-    setStatus('conectado (P2P)', 'ok');
-    setChatEnabled(true);
+    refreshChannel();
     if (!pingTimer) pingTimer = setInterval(() => {
-      if (conn && conn.open) conn.send(JSON.stringify({ t: 'ping', ts: Date.now() }));
+      if (p2pOpen()) conn.send(JSON.stringify({ t: 'ping', ts: Date.now() }));
     }, 1000);
   });
-  conn.on('data', e => {
-    const m = JSON.parse(e);
-    if (m.t === 'ping') conn.send(JSON.stringify({ t: 'pong', ts: m.ts }));
-    else if (m.t === 'pong') { window._rtt = (Date.now() - m.ts) + ' ms'; updateMeta(); }
-    else if (m.t === 'chat') addMsg(m.msg, 'them');
+  conn.on('data', e => onData(e, 'p2p'));
+  conn.on('close', () => {
+    log('Canal P2P cerrado');
+    refreshChannel();
+    if (!relayOpen()) setStatus('conexión cerrada', 'err');
+    updateMeta();
   });
-  conn.on('close', () => { setStatus('conexión cerrada', 'err'); setChatEnabled(false); updateMeta(); });
   conn.on('error', e => {
     log('Error del canal', { type: e.type, message: e.message });
     setStatus('error del canal: ' + e.message, 'err');
@@ -231,6 +266,7 @@ $('btnCreate').onclick = async () => {
       if (!opened) { setStatus(`el código ${code} estaba ocupado, reintentando...`); continue; }
 
       peer = p; role = 'host';
+      openRelay(NS + code, 'host');
       p.on('connection', c => { log('Conexión entrante'); setupConn(c); });
       p.on('disconnected', () => { log('Anfitrión desconectado del servidor, reconectando'); if (peer) peer.reconnect(); });
       p.on('error', e => {
@@ -267,11 +303,12 @@ function join(code){
   if (!/^\d{4}$/.test(code)) return setStatus('el código debe ser de 4 dígitos', 'err');
   log('Uniéndose a sala', { id: NS + code });
   $('btnJoin').disabled = true;
+  openRelay(NS + code, 'guest');
   const p = new Peer(PEER_OPTS);
   p.on('open', id => {
     log('Peer abierto (invitado)', { id });
-    const c = p.connect(NS + code, { reliable: true });
-    setupConn(c);
+    if (!FORCE_RELAY) setupConn(p.connect(NS + code, { reliable: true }));
+    else log('Modo solo relay: no se intenta P2P');
     role = 'guest';
     peer = p;
     p.on('disconnected', () => { if (peer) peer.reconnect(); });
@@ -292,8 +329,11 @@ $('joinCode').addEventListener('input', e => { e.target.value = e.target.value.r
 // --- Chat ---
 function sendChat(){
   const v = $('chatIn').value.trim();
-  if (!v || !conn || !conn.open) return;
-  conn.send(JSON.stringify({ t: 'chat', msg: v }));
+  if (!v) return;
+  const payload = JSON.stringify({ t: 'chat', msg: v });
+  if (p2pOpen()) conn.send(payload);
+  else if (relayOpen() && relayPeerOn) relay.send(payload);
+  else return;
   addMsg(v, 'me');
   $('chatIn').value = '';
   $('chatIn').focus();
