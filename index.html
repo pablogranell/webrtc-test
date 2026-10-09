@@ -104,6 +104,25 @@ window.addEventListener('error', e => log('Error JS', { message: e.message, line
 window.addEventListener('unhandledrejection', e => log('Promesa no capturada', { reason: String((e.reason && e.reason.message) || e.reason) }));
 log('Página cargada', { ua: navigator.userAgent, url: location.href, peerjs: typeof Peer });
 
+// Sonda de tipo de NAT: si varios STUN devuelven el mismo puerto público, el NAT es "cono"
+// y el hole punching puede funcionar. Si los puertos difieren, es simétrico.
+const NAT_PROBE_STUN = ['stun:stun.l.google.com:19302', 'stun:global.stun.twilio.com:3478', 'stun:stun.cloudflare.com:3478'];
+function probeNat(){
+  NAT_PROBE_STUN.forEach(url => {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: url }] });
+    pc.createDataChannel('probe');
+    const t = setTimeout(() => { log('NAT sonda sin respuesta', { server: url }); pc.close(); }, 8000);
+    pc.onicecandidate = e => {
+      if (!e.candidate || e.candidate.type !== 'srflx') return;
+      clearTimeout(t);
+      log('NAT sonda', { server: url, mappedPort: e.candidate.port, localPort: e.candidate.relatedPort });
+      pc.close();
+    };
+    pc.createOffer().then(o => pc.setLocalDescription(o)).catch(e => log('NAT sonda error', { message: e.message }));
+  });
+}
+probeNat();
+
 let peer = null, conn = null, role = null, pingTimer = null;
 
 // TURN público (openrelay de Metered, credenciales publicas). Sirve de relay cuando
