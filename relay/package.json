@@ -1,0 +1,16 @@
+{
+  "name": "webrtc-test-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Relay WebSocket de respaldo para el chat WebRTC cuando el P2P no conecta",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
